@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body>
+<title>Rooster Range</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rye&family=Barlow+Condensed:wght@500;700&display=swap">
+<style>
+  /* Layout: one-screen shooting gallery — scoreboard strip on top, canvas range fills the rest. Single committed dusk-range look. */
+  :root {
+    --night: #1b1f17;
+    --wood: #3a2a1c;
+    --plank: #5a3f26;
+    --brass: #e2b33c;
+    --chalk: #f3ead8;
+    --dim: #a89c84;
+    --red: #d8432f;
+    --display: "Rye", "Rockwell", Georgia, serif;
+    --body: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--night);
+    color: var(--chalk);
+    font-family: var(--body);
+    display: flex;
+    flex-direction: column;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 12px;
+    box-sizing: border-box;
+    gap: 10px;
+    overflow: hidden;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 10px 20px;
+  }
+  h1 {
+    font-family: var(--display); font-weight: 400; margin: 0;
+    font-size: clamp(1.5rem, 4vw, 2.2rem); color: var(--brass); letter-spacing: 0.02em;
+    text-wrap: balance;
+  }
+  .board { display: flex; gap: 8px; flex-wrap: wrap; }
+  .stat {
+    background: var(--wood); border: 1px solid var(--plank); border-radius: 4px;
+    padding: 4px 12px; min-width: 64px; text-align: center;
+  }
+  .stat b { display: block; font-size: 1.5rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--dim); }
+  .stat.hot b { color: var(--brass); }
+  .range {
+    position: relative; flex: 1; min-height: 0;
+    border: 3px solid var(--plank); border-radius: 6px; overflow: hidden;
+    background: var(--wood);
+  }
+  canvas { display: block; width: 100%; height: 100%; cursor: none; touch-action: none; }
+  footer {
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px;
+    font-size: 0.95rem; color: var(--dim);
+  }
+  label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; color: var(--chalk); }
+  input[type="checkbox"] { accent-color: var(--brass); width: 16px; height: 16px; }
+  button {
+    font: 700 0.9rem var(--body); text-transform: uppercase; letter-spacing: 0.1em;
+    background: var(--plank); color: var(--chalk); border: 1px solid var(--brass);
+    border-radius: 4px; padding: 6px 14px; cursor: pointer;
+  }
+  button:hover { background: var(--brass); color: var(--night); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+  .controls { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+</style>
+
+<header>
+  <h1>Rooster Range</h1>
+  <div class="board">
+    <div class="stat"><b id="score">0</b><span>Score</span></div>
+    <div class="stat"><b id="shots">0</b><span>Shots</span></div>
+    <div class="stat hot"><b id="bulls">0</b><span>Bullseyes</span></div>
+    <div class="stat"><b id="last">–</b><span>Last</span></div>
+  </div>
+</header>
+
+<div class="range"><canvas id="c" aria-label="Shooting range. Click or tap to fire at the target."></canvas></div>
+
+<footer>
+  <span>Aim with your mouse or finger, click to fire. Hit the gold X ring for a bullseye.</span>
+  <div class="controls">
+    <label><input type="checkbox" id="moving" checked> Moving target</label>
+    <label><input type="checkbox" id="sound" checked> Sound</label>
+    <button id="reset" type="button">Reset</button>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const g = cv.getContext('2d');
+  const $ = id => document.getElementById(id);
+  const movingBox = $('moving'), soundBox = $('sound');
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) movingBox.checked = false;
+
+  let W = 0, H = 0, dpr = 1;
+  function resize() {
+    const r = cv.getBoundingClientRect();
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  new ResizeObserver(resize).observe(cv);
+  resize();
+
+  // Game state
+  const st = { score: 0, shots: 0, bulls: 0 };
+  let holes = [];      // {dx, dy} in target-radius units
+  let popups = [];     // floating text
+  let flash = 0, recoil = 0, crowShake = 0;
+  let aim = { x: W / 2, y: H * 0.42 };
+  let phase = 0, lastT = performance.now();
+
+  function target() {
+    const R = Math.min(W * 0.36, H * 0.32);
+    const room = Math.max(0, Math.min(W * 0.25, W / 2 - R - 10));
+    const sway = Math.sin(phase * 0.7) * room;
+    const bob = Math.sin(phase * 1.3) * H * 0.03;
+    return { x: W / 2 + sway, y: H * 0.4 + bob, R };
+  }
+  function gunBase() { return { x: W / 2, y: H + 6 }; }
+
+  // ---------- Audio ----------
+  let ac = null;
+  function audio() {
+    if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { ac = null; } }
+    if (ac && ac.state === 'suspended') ac.resume();
+    return ac;
+  }
+
+  function bang() {
+    const a = audio(); if (!a || !soundBox.checked) return;
+    const t = a.currentTime;
+    const len = Math.floor(a.sampleRate * 0.35);
+    const buf = a.createBuffer(1, len, a.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+    const n = a.createBufferSource(); n.buffer = buf;
+    const lp = a.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.setValueAtTime(4000, t); lp.frequency.exponentialRampToValueAtTime(400, t + 0.3);
+    const ng = a.createGain(); ng.gain.setValueAtTime(0.9, t); ng.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+    n.connect(lp).connect(ng).connect(a.destination); n.start(t);
+    const o = a.createOscillator(); o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.2);
+    const og = a.createGain(); og.gain.setValueAtTime(0.8, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+    o.connect(og).connect(a.destination); o.start(t); o.stop(t + 0.25);
+  }
+
+  // Synthesized "cock-a-doodle-doo": five syllables of a raspy sawtooth voice through formant filters.
+  function crow() {
+    const a = audio(); if (!a || !soundBox.checked) return;
+    const t0 = a.currentTime + 0.12;
+    const out = a.createGain(); out.gain.value = 0.55; out.connect(a.destination);
+    const shaper = a.createWaveShaper();
+    const curve = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) { const x = i / 512 - 1; curve[i] = Math.tanh(x * 3); }
+    shaper.curve = curve;
+    const f1 = a.createBiquadFilter(); f1.type = 'bandpass'; f1.frequency.value = 1400; f1.Q.value = 2.5;
+    const f2 = a.createBiquadFilter(); f2.type = 'bandpass'; f2.frequency.value = 2900; f2.Q.value = 3;
+    const f3 = a.createBiquadFilter(); f3.type = 'lowpass'; f3.frequency.value = 5000;
+    const g2 = a.createGain(); g2.gain.value = 0.6;
+    shaper.connect(f1).connect(out);
+    shaper.connect(f2).connect(g2).connect(out);
+    shaper.connect(f3).connect(out);
+
+    // [start, duration, startHz, peakHz, endHz]
+    const syl = [
+      [0.00, 0.14, 560, 760, 700],   // cock
+      [0.19, 0.09, 700, 780, 760],   // a
+      [0.32, 0.12, 820, 1050, 1000], // doo
+      [0.47, 0.10, 980, 1020, 960],  // dle
+      [0.62, 0.95, 1050, 1280, 820]  // doooo
+    ];
+    syl.forEach(([s, dur, a0, peak, end], i) => {
+      const t = t0 + s;
+      const o = a.createOscillator(); o.type = 'sawtooth';
+      const o2 = a.createOscillator(); o2.type = 'square';
+      [o, o2].forEach((osc, k) => {
+        const m = k ? 2.01 : 1;
+        osc.frequency.setValueAtTime(a0 * m, t);
+        osc.frequency.linearRampToValueAtTime(peak * m, t + dur * (i === 4 ? 0.25 : 0.5));
+        osc.frequency.linearRampToValueAtTime(end * m, t + dur);
+      });
+      // rough throat flutter
+      const lfo = a.createOscillator(); lfo.frequency.value = 34 + i * 3;
+      const lg = a.createGain(); lg.gain.value = i === 4 ? 45 : 25;
+      lfo.connect(lg); lg.connect(o.frequency); lg.connect(o2.frequency);
+      const env = a.createGain();
+      const peakG = i === 4 ? 0.5 : 0.42;
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.exponentialRampToValueAtTime(peakG, t + 0.025);
+      env.gain.setValueAtTime(peakG, t + dur * 0.75);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      const mix2 = a.createGain(); mix2.gain.value = 0.25;
+      o.connect(env); o2.connect(mix2).connect(env);
+      env.connect(shaper);
+      [o, o2, lfo].forEach(x => { x.start(t); x.stop(t + dur + 0.05); });
+    });
+  }
+
+  // ---------- Shooting ----------
+  function setAim(e) {
+    const r = cv.getBoundingClientRect();
+    aim.x = Math.max(0, Math.min(W, e.clientX - r.left));
+    aim.y = Math.max(0, Math.min(H, e.clientY - r.top));
+  }
+  cv.addEventListener('pointermove', setAim);
+  cv.addEventListener('pointerdown', e => { setAim(e); fire(); });
+
+  function fire() {
+    audio();
+    bang();
+    flash = 1; recoil = 1;
+    st.shots++;
+    const T = target();
+    const dx = (aim.x - T.x) / T.R, dy = (aim.y - T.y) / T.R;
+    const d = Math.hypot(dx, dy);
+    let pts = 0;
+    if (d <= 1) {
+      pts = Math.min(10, 10 - Math.floor(d * 10));
+      holes.push({ dx, dy });
+      if (holes.length > 60) holes.shift();
+    }
+    st.score += pts;
+    $('last').textContent = pts ? pts : 'Miss';
+    if (d <= 0.1) {
+      st.bulls++;
+      crow();
+      crowShake = 1;
+      popups.push({ text: 'BULLSEYE!', sub: 'Cock-a-doodle-doo!', x: T.x, y: T.y - T.R * 0.2, life: 1, big: true });
+    } else {
+      popups.push({ text: pts ? '+' + pts : 'Miss', x: aim.x, y: aim.y - 14, life: 1 });
+    }
+    $('score').textContent = st.score;
+    $('shots').textContent = st.shots;
+    $('bulls').textContent = st.bulls;
+  }
+
+  $('reset').addEventListener('click', () => {
+    st.score = st.shots = st.bulls = 0; holes = []; popups = [];
+    ['score', 'shots', 'bulls'].forEach(id => $(id).textContent = 0);
+    $('last').textContent = '–';
+  });
+
+  // ---------- Drawing ----------
+  const RINGS = ['#f4f1ea', '#f4f1ea', '#1d1d1d', '#1d1d1d', '#2f7fd0', '#2f7fd0', '#d8432f', '#d8432f', '#f2c230', '#f2c230'];
+
+  function drawBackdrop() {
+    // wooden back wall
+    g.fillStyle = '#3a2a1c'; g.fillRect(0, 0, W, H);
+    const plankH = 46;
+    for (let y = 0; y < H; y += plankH) {
+      g.fillStyle = (y / plankH) % 2 ? '#43301f' : '#3d2b1c';
+      g.fillRect(0, y, W, plankH - 2);
+      g.fillStyle = '#2a1e13'; g.fillRect(0, y + plankH - 2, W, 2);
+    }
+    // counter at the bottom
+    g.fillStyle = '#5a3f26'; g.fillRect(0, H - 34, W, 34);
+    g.fillStyle = '#e2b33c'; g.fillRect(0, H - 34, W, 3);
+  }
+
+  function drawTarget(T) {
+    // stand
+    g.fillStyle = '#2a1e13';
+    g.fillRect(T.x - 6, T.y + T.R * 0.8, 12, H);
+    // straw boss
+    g.beginPath(); g.arc(T.x, T.y, T.R * 1.1, 0, Math.PI * 2);
+    g.fillStyle = '#b9934a'; g.fill();
+    for (let i = 0; i < 10; i++) {
+      const r = T.R * (1 - i / 10);
+      g.beginPath(); g.arc(T.x, T.y, r, 0, Math.PI * 2);
+      g.fillStyle = RINGS[i]; g.fill();
+      g.lineWidth = 1; g.strokeStyle = i === 2 || i === 3 ? '#777' : '#222'; g.stroke();
+    }
+    // X marker in the centre
+    const s = T.R * 0.035;
+    g.strokeStyle = '#222'; g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(T.x - s, T.y - s); g.lineTo(T.x + s, T.y + s); g.moveTo(T.x + s, T.y - s); g.lineTo(T.x - s, T.y + s); g.stroke();
+    // bullet holes
+    holes.forEach(h => {
+      const x = T.x + h.dx * T.R, y = T.y + h.dy * T.R;
+      g.beginPath(); g.arc(x, y, 4, 0, Math.PI * 2); g.fillStyle = '#0c0c0c'; g.fill();
+      g.beginPath(); g.arc(x, y, 5.5, 0, Math.PI * 2); g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 1; g.stroke();
+    });
+  }
+
+  function drawGun() {
+    const b = gunBase();
+    const ang = Math.atan2(aim.y - b.y, aim.x - b.x);
+    const kick = recoil * 18;
+    g.save();
+    g.translate(b.x, b.y);
+    g.rotate(ang);
+    g.translate(-kick, 0);
+    const L = Math.min(150, H * 0.3);
+    // barrel
+    g.fillStyle = '#2b2b2e'; g.fillRect(40, -7, L, 14);
+    g.fillStyle = '#4a4a50'; g.fillRect(40, -7, L, 4);
+    // muzzle
+    g.fillStyle = '#18181a'; g.fillRect(40 + L - 6, -9, 10, 18);
+    // body
+    g.fillStyle = '#3a3a3f'; g.fillRect(-10, -14, 60, 28);
+    // wooden grip
+    g.fillStyle = '#7a4b25';
+    g.beginPath(); g.moveTo(-40, -12); g.lineTo(0, -12); g.lineTo(0, 14); g.lineTo(-50, 20); g.closePath(); g.fill();
+    // brass sight
+    g.fillStyle = '#e2b33c'; g.fillRect(40 + L - 14, -12, 6, 5);
+    // muzzle flash
+    if (flash > 0) {
+      const fx = 40 + L + 6;
+      g.globalAlpha = flash;
+      const grd = g.createRadialGradient(fx + 14, 0, 2, fx + 14, 0, 40);
+      grd.addColorStop(0, '#fff6c8'); grd.addColorStop(0.4, '#ffb320'); grd.addColorStop(1, 'rgba(255,120,0,0)');
+      g.fillStyle = grd;
+      g.beginPath(); g.moveTo(fx, -10); g.lineTo(fx + 60, 0); g.lineTo(fx, 10); g.closePath(); g.fill();
+      g.beginPath(); g.arc(fx + 10, 0, 22, 0, Math.PI * 2); g.fill();
+      g.globalAlpha = 1;
+    }
+    g.restore();
+  }
+
+  function drawCrosshair() {
+    const { x, y } = aim;
+    g.strokeStyle = '#ffffff'; g.lineWidth = 1.5;
+    g.beginPath(); g.arc(x, y, 14, 0, Math.PI * 2); g.stroke();
+    g.beginPath();
+    g.moveTo(x - 22, y); g.lineTo(x - 6, y); g.moveTo(x + 6, y); g.lineTo(x + 22, y);
+    g.moveTo(x, y - 22); g.lineTo(x, y - 6); g.moveTo(x, y + 6); g.lineTo(x, y + 22);
+    g.stroke();
+    g.fillStyle = '#d8432f'; g.beginPath(); g.arc(x, y, 1.8, 0, Math.PI * 2); g.fill();
+  }
+
+  function drawPopups(dt) {
+    popups = popups.filter(p => (p.life -= dt * (p.big ? 0.45 : 1.2)) > 0);
+    popups.forEach(p => {
+      const rise = (1 - p.life) * (p.big ? 50 : 30);
+      g.globalAlpha = Math.min(1, p.life * 2);
+      g.textAlign = 'center';
+      if (p.big) {
+        const sz = Math.max(28, Math.min(64, W * 0.09)) * (1 + (1 - p.life) * 0.15);
+        g.font = `${sz}px Rye, Georgia, serif`;
+        g.lineWidth = 6; g.strokeStyle = '#1b1f17'; g.strokeText(p.text, p.x, p.y - rise);
+        g.fillStyle = '#e2b33c'; g.fillText(p.text, p.x, p.y - rise);
+        g.font = `700 ${sz * 0.42}px "Barlow Condensed", sans-serif`;
+        g.lineWidth = 4; g.strokeText(p.sub, p.x, p.y - rise + sz * 0.6);
+        g.fillStyle = '#f3ead8'; g.fillText(p.sub, p.x, p.y - rise + sz * 0.6);
+      } else {
+        g.font = '700 22px "Barlow Condensed", sans-serif';
+        g.lineWidth = 4; g.strokeStyle = '#1b1f17'; g.strokeText(p.text, p.x, p.y - rise);
+        g.fillStyle = p.text === 'Miss' ? '#a89c84' : '#f3ead8'; g.fillText(p.text, p.x, p.y - rise);
+      }
+      g.globalAlpha = 1;
+    });
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+    if (movingBox.checked) phase += dt;
+    flash = Math.max(0, flash - dt * 9);
+    recoil = Math.max(0, recoil - dt * 6);
+    crowShake = Math.max(0, crowShake - dt * 1.5);
+
+    g.save();
+    if (crowShake > 0) g.translate((Math.random() - 0.5) * 8 * crowShake, (Math.random() - 0.5) * 8 * crowShake);
+    drawBackdrop();
+    drawTarget(target());
+    drawGun();
+    g.restore();
+    drawPopups(dt);
+    drawCrosshair();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
