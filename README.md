@@ -2,6 +2,8 @@
 
 A tiny browser shooting-gallery game. Aim the gun at the archery target and click to fire. Hit the gold X ring for a bullseye, and a rooster crows.
 
+**Rules:** you get 10 shots. Rings score 1–10. A bullseye scores 15 (1.5× the 10 ring) and makes the target move faster for the rest of the game.
+
 **▶ Play it here: https://advikrohith.github.io/rooster-range/**
 
 ## Play locally

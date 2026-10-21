@@ -23,7 +23,8 @@
     --body: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
     color-scheme: dark;
   }
-  html, body { height: 100%; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
   body {
     background: var(--night);
     color: var(--chalk);
@@ -74,26 +75,43 @@
   button:hover { background: var(--brass); color: var(--night); }
   button:focus-visible, input:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
   .controls { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .over {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; text-align: center; padding: 16px; background: rgba(27, 31, 23, 0.82);
+  }
+  .over h2 { font-family: var(--display); font-weight: 400; color: var(--brass); font-size: clamp(1.8rem, 6vw, 3rem); margin: 0; }
+  .over p { margin: 0; font-size: 1.2rem; }
+  .over .final { font-size: clamp(2.5rem, 9vw, 4.5rem); font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .over button { font-size: 1.1rem; padding: 10px 22px; margin-top: 8px; }
 </style>
 
 <header>
   <h1>Rooster Range</h1>
   <div class="board">
     <div class="stat"><b id="score">0</b><span>Score</span></div>
-    <div class="stat"><b id="shots">0</b><span>Shots</span></div>
+    <div class="stat"><b id="shots">10</b><span>Shots left</span></div>
     <div class="stat hot"><b id="bulls">0</b><span>Bullseyes</span></div>
-    <div class="stat"><b id="last">–</b><span>Last</span></div>
+    <div class="stat"><b id="speed">1.0×</b><span>Speed</span></div>
   </div>
 </header>
 
-<div class="range"><canvas id="c" aria-label="Shooting range. Click or tap to fire at the target."></canvas></div>
+<div class="range">
+  <canvas id="c" aria-label="Shooting range. Click or tap to fire at the target."></canvas>
+  <div class="over" id="over" hidden>
+    <h2>Out of shots</h2>
+    <p>Final score</p>
+    <div class="final" id="final">0</div>
+    <p id="summary"></p>
+    <button id="again" type="button">Play again</button>
+  </div>
+</div>
 
 <footer>
-  <span>Aim with your mouse or finger, click to fire. Hit the gold X ring for a bullseye.</span>
+  <span>10 shots per game. Rings score 1–10, a bullseye scores 15 (1.5×) and makes the target faster.</span>
   <div class="controls">
     <label><input type="checkbox" id="moving" checked> Moving target</label>
     <label><input type="checkbox" id="sound" checked> Sound</label>
-    <button id="reset" type="button">Reset</button>
+    <button id="reset" type="button">New game</button>
   </div>
 </footer>
 
@@ -117,7 +135,10 @@
   resize();
 
   // Game state
-  const st = { score: 0, shots: 0, bulls: 0 };
+  const SHOTS_PER_GAME = 10;
+  const BULLSEYE_POINTS = 15;   // 10-ring value × 1.5
+  const SPEED_STEP = 0.35;      // extra target speed per bullseye
+  const st = { score: 0, shots: 0, bulls: 0, speed: 1, over: false };
   let holes = [];      // {dx, dy} in target-radius units
   let popups = [];     // floating text
   let flash = 0, recoil = 0, crowShake = 0;
@@ -216,7 +237,7 @@
     aim.y = Math.max(0, Math.min(H, e.clientY - r.top));
   }
   cv.addEventListener('pointermove', setAim);
-  cv.addEventListener('pointerdown', e => { setAim(e); fire(); });
+  cv.addEventListener('pointerdown', e => { setAim(e); if (!st.over) fire(); });
 
   function fire() {
     audio();
@@ -232,26 +253,48 @@
       holes.push({ dx, dy });
       if (holes.length > 60) holes.shift();
     }
-    st.score += pts;
-    $('last').textContent = pts ? pts : 'Miss';
     if (d <= 0.1) {
+      pts = BULLSEYE_POINTS;
       st.bulls++;
+      st.speed += SPEED_STEP;
       crow();
       crowShake = 1;
-      popups.push({ text: 'BULLSEYE!', sub: 'Cock-a-doodle-doo!', x: T.x, y: T.y - T.R * 0.2, life: 1, big: true });
+      popups.push({ text: 'BULLSEYE!', sub: `+${pts} · Cock-a-doodle-doo!`, x: T.x, y: T.y - T.R * 0.2, life: 1, big: true });
     } else {
       popups.push({ text: pts ? '+' + pts : 'Miss', x: aim.x, y: aim.y - 14, life: 1 });
     }
-    $('score').textContent = st.score;
-    $('shots').textContent = st.shots;
-    $('bulls').textContent = st.bulls;
+    st.score += pts;
+    updateBoard();
+    if (st.shots >= SHOTS_PER_GAME) {
+      st.over = true;
+      // let the last hit (and any crow) play before covering the range
+      setTimeout(showGameOver, d <= 0.1 ? 1600 : 700);
+    }
   }
 
-  $('reset').addEventListener('click', () => {
-    st.score = st.shots = st.bulls = 0; holes = []; popups = [];
-    ['score', 'shots', 'bulls'].forEach(id => $(id).textContent = 0);
-    $('last').textContent = '–';
-  });
+  function updateBoard() {
+    $('score').textContent = st.score;
+    $('shots').textContent = SHOTS_PER_GAME - st.shots;
+    $('bulls').textContent = st.bulls;
+    $('speed').textContent = st.speed.toFixed(2).replace(/0$/, '') + '×';
+  }
+
+  function showGameOver() {
+    if (!st.over) return;
+    $('final').textContent = st.score;
+    $('summary').textContent = `${st.bulls} bullseye${st.bulls === 1 ? '' : 's'} out of ${SHOTS_PER_GAME} shots`;
+    $('over').hidden = false;
+    $('again').focus();
+  }
+
+  function newGame() {
+    Object.assign(st, { score: 0, shots: 0, bulls: 0, speed: 1, over: false });
+    holes = []; popups = []; phase = 0;
+    $('over').hidden = true;
+    updateBoard();
+  }
+  $('reset').addEventListener('click', newGame);
+  $('again').addEventListener('click', newGame);
 
   // ---------- Drawing ----------
   const RINGS = ['#f4f1ea', '#f4f1ea', '#1d1d1d', '#1d1d1d', '#2f7fd0', '#2f7fd0', '#d8432f', '#d8432f', '#f2c230', '#f2c230'];
@@ -366,7 +409,7 @@
 
   function frame(now) {
     const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
-    if (movingBox.checked) phase += dt;
+    if (movingBox.checked) phase += dt * st.speed;
     flash = Math.max(0, flash - dt * 9);
     recoil = Math.max(0, recoil - dt * 6);
     crowShake = Math.max(0, crowShake - dt * 1.5);
